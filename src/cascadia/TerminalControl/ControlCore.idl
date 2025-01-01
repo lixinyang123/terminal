@@ -49,6 +49,16 @@ namespace Microsoft.Terminal.Control
         Boolean EndAtRightBoundary;
     };
 
+    struct SearchRequest
+    {
+        String Text;
+        Boolean GoForward;
+        Boolean CaseSensitive;
+        Boolean RegularExpression;
+        Boolean ResetOnly;
+        Int32 ScrollOffset;
+    };
+
     struct SearchResults
     {
         Int32 TotalMatches;
@@ -70,6 +80,7 @@ namespace Microsoft.Terminal.Control
     {
         IVector<String> History { get; };
         String CurrentCommandline { get; };
+        IVector<String> QuickFixes { get; };
     };
 
     [default_interface] runtimeclass ControlCore : ICoreState
@@ -95,6 +106,7 @@ namespace Microsoft.Terminal.Control
         UInt64 SwapChainHandle { get; };
 
         Windows.Foundation.Size FontSize { get; };
+        Windows.Foundation.Size FontSizeInDips { get; };
         UInt16 FontWeight { get; };
         Single Opacity { get; };
         Boolean UseAcrylic { get; };
@@ -135,9 +147,8 @@ namespace Microsoft.Terminal.Control
         void ResumeRendering();
         void BlinkAttributeTick();
 
-        SearchResults Search(String text, Boolean goForward, Boolean caseSensitive, Boolean regularExpression, Boolean reset);
+        SearchResults Search(SearchRequest request);
         void ClearSearch();
-        Boolean SnapSearchResultToSelection;
 
         Microsoft.Terminal.Core.Color ForegroundColor { get; };
         Microsoft.Terminal.Core.Color BackgroundColor { get; };
@@ -155,6 +166,7 @@ namespace Microsoft.Terminal.Control
 
         String ReadEntireBuffer();
         CommandHistoryContext CommandHistory();
+        Boolean QuickFixesAvailable { get; };
 
         void AdjustOpacity(Single Opacity, Boolean relative);
         void WindowVisibilityChanged(Boolean showOrHide);
@@ -166,6 +178,10 @@ namespace Microsoft.Terminal.Control
         Boolean ShouldShowSelectCommand();
         Boolean ShouldShowSelectOutput();
 
+        void OpenCWD();
+
+        void ClearQuickFix();
+
         // These events are called from some background thread
         event Windows.Foundation.TypedEventHandler<Object, TitleChangedEventArgs> TitleChanged;
         event Windows.Foundation.TypedEventHandler<Object, Object> WarningBell;
@@ -174,6 +190,9 @@ namespace Microsoft.Terminal.Control
         event Windows.Foundation.TypedEventHandler<Object, Object> TaskbarProgressChanged;
         event Windows.Foundation.TypedEventHandler<Object, Object> RendererEnteredErrorState;
         event Windows.Foundation.TypedEventHandler<Object, ShowWindowArgs> ShowWindowChanged;
+        event Windows.Foundation.TypedEventHandler<Object, SearchMissingCommandEventArgs> SearchMissingCommand;
+        event Windows.Foundation.TypedEventHandler<Object, Object> RefreshQuickFixUI;
+        event Windows.Foundation.TypedEventHandler<Object, WindowSizeChangedEventArgs> WindowSizeChanged;
 
         // These events are always called from the UI thread (bugs aside)
         event Windows.Foundation.TypedEventHandler<Object, FontSizeChangedArgs> FontSizeChanged;

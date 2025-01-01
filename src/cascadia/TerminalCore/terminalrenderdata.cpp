@@ -48,7 +48,7 @@ til::point Terminal::GetCursorPosition() const noexcept
 bool Terminal::IsCursorVisible() const noexcept
 {
     const auto& cursor = _activeBuffer().GetCursor();
-    return cursor.IsVisible() && !cursor.IsPopupShown();
+    return cursor.IsVisible();
 }
 
 bool Terminal::IsCursorOn() const noexcept
@@ -127,17 +127,16 @@ std::pair<COLORREF, COLORREF> Terminal::GetAttributeColors(const TextAttribute& 
     return GetRenderSettings().GetAttributeColors(attr);
 }
 
-std::vector<Microsoft::Console::Types::Viewport> Terminal::GetSelectionRects() noexcept
+std::span<const til::point_span> Terminal::GetSelectionSpans() const noexcept
 try
 {
-    std::vector<Viewport> result;
-
-    for (const auto& lineRect : _GetSelectionRects())
+    if (_selection.generation() != _lastSelectionGeneration)
     {
-        result.emplace_back(Viewport::FromInclusive(lineRect));
+        _lastSelectionSpans = _GetSelectionSpans();
+        _lastSelectionGeneration = _selection.generation();
     }
 
-    return result;
+    return _lastSelectionSpans;
 }
 catch (...)
 {

@@ -97,30 +97,24 @@ CATCH_RETURN();
 
 void UiaTextRangeBase::Initialize(_In_ const UiaPoint point)
 {
-    til::point clientPoint;
-    clientPoint.x = static_cast<LONG>(point.x);
-    clientPoint.y = static_cast<LONG>(point.y);
-    // get row that point resides in
-    const auto windowRect = _getTerminalRect();
-    const auto viewport = _pData->GetViewport().ToInclusive();
-    til::CoordType row = 0;
-    if (clientPoint.y <= windowRect.top)
-    {
-        row = viewport.top;
-    }
-    else if (clientPoint.y >= windowRect.bottom)
-    {
-        row = viewport.bottom;
-    }
-    else
-    {
-        // change point coords to pixels relative to window
-        _TranslatePointFromScreen(&clientPoint);
+    til::point clientPoint{ static_cast<til::CoordType>(point.x), static_cast<til::CoordType>(point.y) };
 
-        const auto currentFontSize = _getScreenFontSize();
-        row = clientPoint.y / currentFontSize.height + viewport.top;
-    }
-    _start = { 0, row };
+    // clamp the point to be within the client area
+    const auto windowRect = _getTerminalRect();
+    clientPoint.x = std::clamp(clientPoint.x, windowRect.left, windowRect.right);
+    clientPoint.y = std::clamp(clientPoint.y, windowRect.top, windowRect.bottom);
+
+    // convert point to be relative to client area
+    _TranslatePointFromScreen(clientPoint);
+
+    // convert the point to screen buffer coordinates
+    _pData->LockConsole();
+    const auto currentFontSize = _getScreenFontSize();
+    const auto viewport = _pData->GetViewport().ToInclusive();
+    _pData->UnlockConsole();
+
+    _start = { clientPoint.x / currentFontSize.width + viewport.left,
+               clientPoint.y / currentFontSize.height + viewport.top };
     _end = _start;
 }
 
@@ -561,7 +555,7 @@ try
         const auto originY{ std::min(_start.y, inclusiveEnd.y) };
         const auto width{ std::abs(inclusiveEnd.x - _start.x + 1) };
         const auto height{ std::abs(inclusiveEnd.y - _start.y + 1) };
-        viewportRange = Viewport::FromDimensions({ originX, originY }, width, height);
+        viewportRange = Viewport::FromDimensions({ originX, originY }, { width, height });
     }
     auto iter{ buffer.GetCellDataAt(searchStart, viewportRange) };
     const auto iterStep{ searchBackwards ? -1 : 1 };
@@ -827,7 +821,7 @@ try
         const auto originY{ std::min(_start.y, inclusiveEnd.y) };
         const auto width{ std::abs(inclusiveEnd.x - _start.x + 1) };
         const auto height{ std::abs(inclusiveEnd.y - _start.y + 1) };
-        viewportRange = Viewport::FromDimensions({ originX, originY }, width, height);
+        viewportRange = Viewport::FromDimensions({ originX, originY }, { width, height });
     }
     auto iter{ buffer.GetCellDataAt(_start, viewportRange) };
     for (; iter && iter.Pos() != inclusiveEnd; ++iter)
@@ -1337,7 +1331,7 @@ Viewport UiaTextRangeBase::_getOptimizedBufferSize() const noexcept
     const auto width = textBufferEnd.x + 1;
     const auto height = textBufferEnd.y + 1;
 
-    return Viewport::FromDimensions({ 0, 0 }, width, height);
+    return Viewport::FromDimensions({ 0, 0 }, { width, height });
 }
 
 // We consider the "document end" to be the line beneath the cursor or
@@ -1381,8 +1375,8 @@ void UiaTextRangeBase::_getBoundingRect(const til::rect& textRect, _Inout_ std::
 
     // convert the coords to be relative to the screen instead of
     // the client window
-    _TranslatePointToScreen(&topLeft);
-    _TranslatePointToScreen(&bottomRight);
+    _TranslatePointToScreen(topLeft);
+    _TranslatePointToScreen(bottomRight);
 
     const long width = bottomRight.x - topLeft.x;
     const long height = bottomRight.y - topLeft.y;

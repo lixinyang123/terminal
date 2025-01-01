@@ -194,9 +194,11 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     //     Windows Clipboard (CascadiaWin32:main.cpp).
     // Arguments:
     // - singleLine: collapse all of the text to one line
+    // - withControlSequences: if enabled, the copied plain text contains color/style ANSI escape codes from the selection
     // - formats: which formats to copy (defined by action's CopyFormatting arg). nullptr
     //             if we should defer which formats are copied to the global setting
     bool ControlInteractivity::CopySelectionToClipboard(bool singleLine,
+                                                        bool withControlSequences,
                                                         const Windows::Foundation::IReference<CopyFormat>& formats)
     {
         if (_core)
@@ -213,7 +215,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             // Mark the current selection as copied
             _selectionNeedsToBeCopied = false;
 
-            return _core->CopySelectionToClipboard(singleLine, formats);
+            return _core->CopySelectionToClipboard(singleLine, withControlSequences, formats);
         }
 
         return false;
@@ -312,7 +314,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             else
             {
                 // Try to copy the text and clear the selection
-                const auto successfulCopy = CopySelectionToClipboard(shiftEnabled, nullptr);
+                const auto successfulCopy = CopySelectionToClipboard(shiftEnabled, false, nullptr);
                 _core->ClearSelection();
                 if (_core->CopyOnSelect() || !successfulCopy)
                 {
@@ -324,12 +326,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
     }
 
-    void ControlInteractivity::TouchPressed(const Core::Point contactPoint)
+    void ControlInteractivity::TouchPressed(const winrt::Windows::Foundation::Point contactPoint)
     {
         _touchAnchor = contactPoint;
     }
 
-    void ControlInteractivity::PointerMoved(Control::MouseButtonState buttonState,
+    bool ControlInteractivity::PointerMoved(Control::MouseButtonState buttonState,
                                             const unsigned int pointerUpdateKind,
                                             const ::Microsoft::Terminal::Core::ControlKeyStates modifiers,
                                             const bool focused,
@@ -337,11 +339,14 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                                             const bool pointerPressedInBounds)
     {
         const auto terminalPosition = _getTerminalPosition(til::point{ pixelPosition });
+        // Returning true from this function indicates that the caller should do no further processing of this movement.
+        bool handledCompletely = false;
 
         // Short-circuit isReadOnly check to avoid warning dialog
         if (focused && !_core->IsInReadOnlyMode() && _canSendVTMouseInput(modifiers))
         {
             _sendMouseEventHelper(terminalPosition, pointerUpdateKind, modifiers, 0, buttonState);
+            handledCompletely = true;
         }
         // GH#4603 - don't modify the selection if the pointer press didn't
         // actually start _in_ the control bounds. Case in point - someone drags
@@ -378,9 +383,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
 
         _core->SetHoveredCell(terminalPosition.to_core_point());
+        return handledCompletely;
     }
 
-    void ControlInteractivity::TouchMoved(const Core::Point newTouchPoint,
+    void ControlInteractivity::TouchMoved(const winrt::Windows::Foundation::Point newTouchPoint,
                                           const bool focused)
     {
         if (focused &&
@@ -441,7 +447,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             // IMPORTANT!
             // DO NOT clear the selection here!
             // Otherwise, the selection will be cleared immediately after you make it.
-            CopySelectionToClipboard(false, nullptr);
+            CopySelectionToClipboard(false, false, nullptr);
         }
 
         _singleClickTouchdownPos = std::nullopt;
@@ -682,13 +688,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                                                      const SHORT wheelDelta,
                                                      Control::MouseButtonState buttonState)
     {
-        const auto adjustment = _core->ScrollOffset() > 0 ? _core->BufferHeight() - _core->ScrollOffset() - _core->ViewHeight() : 0;
-        // If the click happened outside the active region, just don't send any mouse event
-        if (const auto adjustedY = terminalPosition.y - adjustment; adjustedY >= 0)
-        {
-            return _core->SendMouseEvent({ terminalPosition.x, adjustedY }, pointerUpdateKind, modifiers, wheelDelta, toInternalMouseState(buttonState));
-        }
-        return false;
+        const auto adjustment = _core->BufferHeight() - _core->ScrollOffset() - _core->ViewHeight();
+        // If the click happened outside the active region, core should get a chance to filter it out or clamp it.
+        const auto adjustedY = terminalPosition.y - adjustment;
+        return _core->SendMouseEvent({ terminalPosition.x, adjustedY }, pointerUpdateKind, modifiers, wheelDelta, toInternalMouseState(buttonState));
     }
 
     // Method Description:
@@ -723,17 +726,5 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     ::Microsoft::Console::Render::IRenderData* ControlInteractivity::GetRenderData() const
     {
         return _core->GetRenderData();
-    }
-
-    // Method Description:
-    // - Used by the TermControl to know if it should translate drag-dropped
-    //   paths into WSL-friendly paths.
-    // Arguments:
-    // - <none>
-    // Return Value:
-    // - true if the connection we were created with was a WSL profile.
-    bool ControlInteractivity::ManglePathsForWsl()
-    {
-        return _core->Settings().ProfileSource() == L"Windows.Terminal.Wsl";
     }
 }

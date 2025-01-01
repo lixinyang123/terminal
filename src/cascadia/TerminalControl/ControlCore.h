@@ -68,8 +68,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     {
         til::property<Windows::Foundation::Collections::IVector<winrt::hstring>> History;
         til::property<winrt::hstring> CurrentCommandline;
+        til::property<Windows::Foundation::Collections::IVector<winrt::hstring>> QuickFixes;
 
-        CommandHistoryContext(std::vector<winrt::hstring>&& history)
+        CommandHistoryContext(std::vector<winrt::hstring>&& history) :
+            QuickFixes(winrt::single_threaded_vector<winrt::hstring>())
         {
             History(winrt::single_threaded_vector<winrt::hstring>(std::move(history)));
         }
@@ -121,7 +123,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         void SendInput(std::wstring_view wstr);
         void PasteText(const winrt::hstring& hstr);
-        bool CopySelectionToClipboard(bool singleLine, const Windows::Foundation::IReference<CopyFormat>& formats);
+        bool CopySelectionToClipboard(bool singleLine, bool withControlSequences, const Windows::Foundation::IReference<CopyFormat>& formats);
         void SelectAll();
         void ClearSelection();
         bool ToggleBlockSelection();
@@ -152,6 +154,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         void Close();
         void PersistToPath(const wchar_t* path) const;
         void RestoreFromPath(const wchar_t* path) const;
+
+        void ClearQuickFix();
+
+        void OpenCWD();
 
 #pragma region ICoreState
         const size_t TaskbarState() const noexcept;
@@ -184,6 +190,8 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         void ContextMenuSelectCommand();
         void ContextMenuSelectOutput();
+
+        winrt::hstring CurrentWorkingDirectory() const;
 #pragma endregion
 
 #pragma region ITerminalInput
@@ -219,11 +227,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         void SetSelectionAnchor(const til::point position);
         void SetEndSelectionPoint(const til::point position);
 
-        SearchResults Search(const std::wstring_view& text, bool goForward, bool caseSensitive, bool regularExpression, bool reset);
+        SearchResults Search(SearchRequest request);
         const std::vector<til::point_span>& SearchResultRows() const noexcept;
         void ClearSearch();
-        void SnapSearchResultToSelection(bool snap) noexcept;
-        bool SnapSearchResultToSelection() const noexcept;
 
         void LeftClickOnTerminal(const til::point terminalPosition,
                                  const int numberOfClicks,
@@ -241,6 +247,8 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         hstring ReadEntireBuffer() const;
         Control::CommandHistoryContext CommandHistory() const;
+        bool QuickFixesAvailable() const noexcept;
+        void UpdateQuickFixes(const Windows::Foundation::Collections::IVector<hstring>& quickFixes);
 
         void AdjustOpacity(const float opacity, const bool relative);
 
@@ -285,6 +293,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         til::typed_event<IInspectable, Control::UpdateSelectionMarkersEventArgs> UpdateSelectionMarkers;
         til::typed_event<IInspectable, Control::OpenHyperlinkEventArgs> OpenHyperlink;
         til::typed_event<IInspectable, Control::CompletionsChangedEventArgs> CompletionsChanged;
+        til::typed_event<IInspectable, Control::SearchMissingCommandEventArgs> SearchMissingCommand;
+        til::typed_event<> RefreshQuickFixUI;
+        til::typed_event<IInspectable, Control::WindowSizeChangedEventArgs> WindowSizeChanged;
 
         til::typed_event<> CloseTerminalRequested;
         til::typed_event<> RestartTerminalRequested;
@@ -296,6 +307,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         struct SharedState
         {
             std::unique_ptr<til::debounced_func_trailing<>> outputIdle;
+            std::unique_ptr<til::debounced_func_trailing<bool>> focusChanged;
             std::shared_ptr<ThrottledFuncTrailing<Control::ScrollPositionChangedArgs>> updateScrollBar;
         };
 
@@ -309,6 +321,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         winrt::com_ptr<ControlSettings> _settings{ nullptr };
 
         std::shared_ptr<::Microsoft::Terminal::Core::Terminal> _terminal{ nullptr };
+        std::wstring _pendingResponses;
 
         // NOTE: _renderEngine must be ordered before _renderer.
         //
@@ -354,6 +367,8 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         til::point _contextMenuBufferPosition{ 0, 0 };
 
+        Windows::Foundation::Collections::IVector<hstring> _cachedQuickFixes{ nullptr };
+
         void _setupDispatcherAndCallbacks();
 
         bool _setFontSizeUnderLock(float fontSize);
@@ -377,8 +392,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         void _terminalPlayMidiNote(const int noteNumber,
                                    const int velocity,
                                    const std::chrono::microseconds duration);
+        void _terminalSearchMissingCommand(std::wstring_view missingCommand, const til::CoordType& bufferRow);
+        void _terminalWindowSizeChanged(int32_t width, int32_t height);
 
-        winrt::fire_and_forget _terminalCompletionsChanged(std::wstring_view menuJson, unsigned int replaceLength);
+        safe_void_coroutine _terminalCompletionsChanged(std::wstring_view menuJson, unsigned int replaceLength);
 
 #pragma endregion
 
@@ -387,7 +404,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
 #pragma region RendererCallbacks
         void _rendererWarning(const HRESULT hr, wil::zwstring_view parameter);
-        winrt::fire_and_forget _renderEngineSwapChainChanged(const HANDLE handle);
+        safe_void_coroutine _renderEngineSwapChainChanged(const HANDLE handle);
         void _rendererBackgroundColorChanged();
         void _rendererTabColorChanged();
 #pragma endregion

@@ -18,6 +18,7 @@
 #include "../../renderer/atlas/AtlasEngine.h"
 #include "../../renderer/base/renderer.hpp"
 #include "../../renderer/uia/UiaRenderer.hpp"
+#include "../../types/inc/CodepointWidthDetector.hpp"
 
 #include "ControlCore.g.cpp"
 #include "SelectionColor.g.cpp"
@@ -71,6 +72,23 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         _desiredFont{ DEFAULT_FONT_FACE, 0, DEFAULT_FONT_WEIGHT, DEFAULT_FONT_SIZE, CP_UTF8 },
         _actualFont{ DEFAULT_FONT_FACE, 0, DEFAULT_FONT_WEIGHT, { 0, DEFAULT_FONT_SIZE }, CP_UTF8, false }
     {
+        static const auto textMeasurementInit = [&]() {
+            TextMeasurementMode mode = TextMeasurementMode::Graphemes;
+            switch (settings.TextMeasurement())
+            {
+            case TextMeasurement::Wcswidth:
+                mode = TextMeasurementMode::Wcswidth;
+                break;
+            case TextMeasurement::Console:
+                mode = TextMeasurementMode::Console;
+                break;
+            default:
+                break;
+            }
+            CodepointWidthDetector::Singleton().Reset(mode);
+            return true;
+        }();
+
         _settings = winrt::make_self<implementation::ControlSettings>(settings, unfocusedAppearance);
         _terminal = std::make_shared<::Microsoft::Terminal::Core::Terminal>();
         const auto lock = _terminal->LockForWriting();
@@ -80,7 +98,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         Connection(connection);
 
         _terminal->SetWriteInputCallback([this](std::wstring_view wstr) {
-            _sendInputToConnection(wstr);
+            _pendingResponses.append(wstr);
         });
 
         // GH#8969: pre-seed working directory to prevent potential races
@@ -109,6 +127,15 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         auto pfnCompletionsChanged = [=](auto&& menuJson, auto&& replaceLength) { _terminalCompletionsChanged(menuJson, replaceLength); };
         _terminal->CompletionsChangedCallback(pfnCompletionsChanged);
+
+        auto pfnSearchMissingCommand = [this](auto&& PH1, auto&& PH2) { _terminalSearchMissingCommand(std::forward<decltype(PH1)>(PH1), std::forward<decltype(PH2)>(PH2)); };
+        _terminal->SetSearchMissingCommandCallback(pfnSearchMissingCommand);
+
+        auto pfnClearQuickFix = [this] { ClearQuickFix(); };
+        _terminal->SetClearQuickFixCallback(pfnClearQuickFix);
+
+        auto pfnWindowSizeChanged = [this](auto&& PH1, auto&& PH2) { _terminalWindowSizeChanged(std::forward<decltype(PH1)>(PH1), std::forward<decltype(PH2)>(PH2)); };
+        _terminal->SetWindowSizeChangedCallback(pfnWindowSizeChanged);
 
         // MSFT 33353327: Initialize the renderer in the ctor instead of Initialize().
         // We need the renderer to be ready to accept new engines before the SwapChainPanel is ready to go.
@@ -171,6 +198,17 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                 {
                     const auto lock = t->LockForWriting();
                     t->UpdatePatternsUnderLock();
+                }
+            });
+
+        // If you rapidly show/hide Windows Terminal, something about GotFocus()/LostFocus() gets broken.
+        // We'll then receive easily 10+ such calls from WinUI the next time the application is shown.
+        shared->focusChanged = std::make_unique<til::debounced_func_trailing<bool>>(
+            std::chrono::milliseconds{ 25 },
+            [weakThis = get_weak()](const bool focused) {
+                if (const auto core{ weakThis.get() })
+                {
+                    core->_focusChanged(focused);
                 }
             });
 
@@ -325,9 +363,6 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             const auto viewInPixels = Viewport::FromDimensions({ 0, 0 }, windowSize);
             LOG_IF_FAILED(_renderEngine->SetWindowSize({ viewInPixels.Width(), viewInPixels.Height() }));
 
-            // Update AtlasEngine's SelectionBackground
-            _renderEngine->SetSelectionBackground(til::color{ _settings->SelectionBackground() });
-
             const auto vp = _renderEngine->GetViewportInCharacters(viewInPixels);
             const auto width = vp.Width();
             const auto height = vp.Height();
@@ -399,6 +434,17 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // - <none>
     void ControlCore::_sendInputToConnection(std::wstring_view wstr)
     {
+        _connection.WriteInput(winrt_wstring_to_array_view(wstr));
+    }
+
+    // Method Description:
+    // - Writes the given sequence as input to the active terminal connection,
+    // Arguments:
+    // - wstr: the string of characters to write to the terminal connection.
+    // Return Value:
+    // - <none>
+    void ControlCore::SendInput(const std::wstring_view wstr)
+    {
         if (wstr.empty())
         {
             return;
@@ -414,19 +460,8 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         else
         {
-            _connection.WriteInput(wstr);
+            _sendInputToConnection(wstr);
         }
-    }
-
-    // Method Description:
-    // - Writes the given sequence as input to the active terminal connection,
-    // Arguments:
-    // - wstr: the string of characters to write to the terminal connection.
-    // Return Value:
-    // - <none>
-    void ControlCore::SendInput(const std::wstring_view wstr)
-    {
-        _sendInputToConnection(wstr);
     }
 
     bool ControlCore::SendCharEvent(const wchar_t ch,
@@ -464,7 +499,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         if (out)
         {
-            _sendInputToConnection(*out);
+            SendInput(*out);
             return true;
         }
         return false;
@@ -539,7 +574,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             else if (vkey == VK_RETURN && !mods.IsCtrlPressed() && !mods.IsAltPressed())
             {
                 // [Shift +] Enter --> copy text
-                CopySelectionToClipboard(mods.IsShiftPressed(), nullptr);
+                CopySelectionToClipboard(mods.IsShiftPressed(), false, nullptr);
                 _terminal->ClearSelection();
                 _updateSelectionUI();
                 return true;
@@ -622,7 +657,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         if (out)
         {
-            _sendInputToConnection(*out);
+            SendInput(*out);
             return true;
         }
         return false;
@@ -641,7 +676,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         if (out)
         {
-            _sendInputToConnection(*out);
+            SendInput(*out);
             return true;
         }
         return false;
@@ -876,7 +911,6 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         if (_renderEngine)
         {
             // Update AtlasEngine settings under the lock
-            _renderEngine->SetSelectionBackground(til::color{ newAppearance->SelectionBackground() });
             _renderEngine->SetRetroTerminalEffect(newAppearance->RetroTerminalEffect());
             _renderEngine->SetPixelShaderPath(newAppearance->PixelShaderPath());
             _renderEngine->SetPixelShaderImagePath(newAppearance->PixelShaderImagePath());
@@ -1281,9 +1315,11 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     //     Windows Clipboard (CascadiaWin32:main.cpp).
     // Arguments:
     // - singleLine: collapse all of the text to one line
+    // - withControlSequences: if enabled, the copied plain text contains color/style ANSI escape codes from the selection
     // - formats: which formats to copy (defined by action's CopyFormatting arg). nullptr
     //             if we should defer which formats are copied to the global setting
     bool ControlCore::CopySelectionToClipboard(bool singleLine,
+                                               bool withControlSequences,
                                                const Windows::Foundation::IReference<CopyFormat>& formats)
     {
         ::Microsoft::Terminal::Core::Terminal::TextCopyData payload;
@@ -1305,7 +1341,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
             // extract text from buffer
             // RetrieveSelectedTextFromBuffer will lock while it's reading
-            payload = _terminal->RetrieveSelectedTextFromBuffer(singleLine, copyHtml, copyRtf);
+            payload = _terminal->RetrieveSelectedTextFromBuffer(singleLine, withControlSequences, copyHtml, copyRtf);
         }
 
         copyToClipboard(payload.plainText, payload.html, payload.rtf);
@@ -1392,7 +1428,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
 
         // It's important to not hold the terminal lock while calling this function as sending the data may take a long time.
-        _sendInputToConnection(filtered);
+        SendInput(filtered);
 
         const auto lock = _terminal->LockForWriting();
         _terminal->ClearSelection();
@@ -1609,6 +1645,29 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         _midiAudio.PlayNote(reinterpret_cast<HWND>(_owningHwnd), noteNumber, velocity, std::chrono::duration_cast<std::chrono::milliseconds>(duration));
     }
 
+    void ControlCore::_terminalWindowSizeChanged(int32_t width, int32_t height)
+    {
+        auto size = winrt::make<implementation::WindowSizeChangedEventArgs>(width, height);
+        WindowSizeChanged.raise(*this, size);
+    }
+
+    void ControlCore::_terminalSearchMissingCommand(std::wstring_view missingCommand, const til::CoordType& bufferRow)
+    {
+        SearchMissingCommand.raise(*this, make<implementation::SearchMissingCommandEventArgs>(hstring{ missingCommand }, bufferRow));
+    }
+
+    void ControlCore::OpenCWD()
+    {
+        const auto workingDirectory = WorkingDirectory();
+        ShellExecute(nullptr, nullptr, L"explorer", workingDirectory.c_str(), nullptr, SW_SHOW);
+    }
+
+    void ControlCore::ClearQuickFix()
+    {
+        _cachedQuickFixes = nullptr;
+        RefreshQuickFixUI.raise(*this, nullptr);
+    }
+
     bool ControlCore::HasSelection() const
     {
         const auto lock = _terminal->LockForReading();
@@ -1650,45 +1709,48 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // Arguments:
     // - text: the text to search
     // - goForward: boolean that represents if the current search direction is forward
-    // - caseSensitive: boolean that represents if the current search is case sensitive
+    // - caseSensitive: boolean that represents if the current search is case-sensitive
     // - resetOnly: If true, only Reset() will be called, if anything. FindNext() will never be called.
     // Return Value:
     // - <none>
-    SearchResults ControlCore::Search(const std::wstring_view& text, const bool goForward, const bool caseSensitive, const bool regularExpression, const bool resetOnly)
+    SearchResults ControlCore::Search(SearchRequest request)
     {
         const auto lock = _terminal->LockForWriting();
-        SearchFlag flags{};
-        WI_SetFlagIf(flags, SearchFlag::CaseInsensitive, !caseSensitive);
-        WI_SetFlagIf(flags, SearchFlag::RegularExpression, regularExpression);
-        const auto searchInvalidated = _searcher.IsStale(*_terminal.get(), text, flags);
 
-        if (searchInvalidated || !resetOnly)
+        SearchFlag flags{};
+        WI_SetFlagIf(flags, SearchFlag::CaseInsensitive, !request.CaseSensitive);
+        WI_SetFlagIf(flags, SearchFlag::RegularExpression, request.RegularExpression);
+        const auto searchInvalidated = _searcher.IsStale(*_terminal.get(), request.Text, flags);
+
+        if (searchInvalidated || !request.ResetOnly)
         {
             std::vector<til::point_span> oldResults;
+            til::point_span oldFocused;
+
+            if (const auto focused = _terminal->GetSearchHighlightFocused())
+            {
+                oldFocused = *focused;
+            }
 
             if (searchInvalidated)
             {
                 oldResults = _searcher.ExtractResults();
-                _searcher.Reset(*_terminal.get(), text, flags, !goForward);
-
-                if (SnapSearchResultToSelection())
-                {
-                    _searcher.MoveToCurrentSelection();
-                    SnapSearchResultToSelection(false);
-                }
-
+                _searcher.Reset(*_terminal.get(), request.Text, flags, !request.GoForward);
                 _terminal->SetSearchHighlights(_searcher.Results());
             }
-            else
+
+            if (!request.ResetOnly)
             {
-                _searcher.FindNext(!goForward);
+                _searcher.FindNext(!request.GoForward);
             }
 
-            if (const auto idx = _searcher.CurrentMatch(); idx >= 0)
-            {
-                _terminal->SetSearchHighlightFocused(gsl::narrow<size_t>(idx));
-            }
+            _terminal->SetSearchHighlightFocused(gsl::narrow<size_t>(std::max<ptrdiff_t>(0, _searcher.CurrentMatch())));
             _renderer->TriggerSearchHighlight(oldResults);
+
+            if (const auto focused = _terminal->GetSearchHighlightFocused(); focused && *focused != oldFocused)
+            {
+                _terminal->ScrollToSearchHighlight(request.ScrollOffset);
+            }
         }
 
         int32_t totalMatches = 0;
@@ -1716,25 +1778,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     {
         const auto lock = _terminal->LockForWriting();
         _terminal->SetSearchHighlights({});
-        _terminal->SetSearchHighlightFocused({});
+        _terminal->SetSearchHighlightFocused(0);
         _renderer->TriggerSearchHighlight(_searcher.Results());
         _searcher = {};
-    }
-
-    // Method Description:
-    // - Tells ControlCore to snap the current search result index to currently
-    //   selected text if the search was started using it.
-    void ControlCore::SnapSearchResultToSelection(bool shouldSnap) noexcept
-    {
-        _snapSearchResultToSelection = shouldSnap;
-    }
-
-    // Method Description:
-    // - Returns true, if we should snap the current search result index to
-    //   the currently selected text after a new search is started, else false.
-    bool ControlCore::SnapSearchResultToSelection() const noexcept
-    {
-        return _snapSearchResultToSelection;
     }
 
     void ControlCore::Close()
@@ -1815,32 +1861,14 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
             if (read < sizeof(buffer))
             {
+                // Normally the cursor should already be at the start of the line, but let's be absolutely sure it is.
+                if (_terminal->GetCursorPosition().x != 0)
+                {
+                    _terminal->Write(L"\r\n");
+                }
+                _terminal->Write(message);
                 break;
             }
-        }
-
-        {
-            const auto lock = _terminal->LockForWriting();
-
-            // Normally the cursor should already be at the start of the line, but let's be absolutely sure it is.
-            if (_terminal->GetCursorPosition().x != 0)
-            {
-                _terminal->Write(L"\r\n");
-            }
-
-            _terminal->Write(message);
-
-            // Show 3 lines of scrollback to the user, so they know it's there. Otherwise, in particular with the well
-            // hidden touch scrollbars in WinUI 2 and later, there's no indication that there's something to scroll up to.
-            //
-            // We only show 3 lines because ConPTY doesn't know about our restored buffer contents initially,
-            // and so ReadConsole calls will return whitespace.
-            //
-            // We also avoid using actual newlines or similar here, because if we ever change our text buffer implementation
-            // to actually track the written contents, we don't want this to be part of the next buffer snapshot.
-            const auto cursorPosition = _terminal->GetCursorPosition();
-            const auto y = std::max(0, cursorPosition.y - 4);
-            _terminal->SetViewportPosition({ 0, y });
         }
     }
 
@@ -1849,7 +1877,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         RendererWarning.raise(*this, winrt::make<RendererWarningArgs>(hr, winrt::hstring{ parameter }));
     }
 
-    winrt::fire_and_forget ControlCore::_renderEngineSwapChainChanged(const HANDLE sourceHandle)
+    safe_void_coroutine ControlCore::_renderEngineSwapChainChanged(const HANDLE sourceHandle)
     {
         // `sourceHandle` is a weak ref to a HANDLE that's ultimately owned by the
         // render engine's own unique_handle. We'll add another ref to it here.
@@ -2094,7 +2122,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                     // Sending input requires that we're unlocked, because
                     // writing the input pipe may block indefinitely.
                     const auto suspension = _terminal->SuspendLock();
-                    _sendInputToConnection(buffer);
+                    SendInput(buffer);
                 }
             }
         }
@@ -2151,6 +2179,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                 _terminal->Write(hstr);
             }
 
+            if (!_pendingResponses.empty())
+            {
+                _sendInputToConnection(_pendingResponses);
+                _pendingResponses.clear();
+            }
+
             // Start the throttled update of where our hyperlinks are.
             const auto shared = _shared.lock_shared();
             if (shared->outputIdle)
@@ -2193,19 +2227,32 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // - <none>
     void ControlCore::ClearBuffer(Control::ClearBufferType clearType)
     {
-        if (clearType == Control::ClearBufferType::Scrollback || clearType == Control::ClearBufferType::All)
+        std::wstring_view command;
+        switch (clearType)
+        {
+        case ClearBufferType::Screen:
+            command = L"\x1b[H\x1b[2J";
+            break;
+        case ClearBufferType::Scrollback:
+            command = L"\x1b[3J";
+            break;
+        case ClearBufferType::All:
+            command = L"\x1b[H\x1b[2J\x1b[3J";
+            break;
+        }
+
         {
             const auto lock = _terminal->LockForWriting();
-            _terminal->EraseScrollback();
+            _terminal->Write(command);
         }
 
         if (clearType == Control::ClearBufferType::Screen || clearType == Control::ClearBufferType::All)
         {
-            // Send a signal to conpty to clear the buffer.
             if (auto conpty{ _connection.try_as<TerminalConnection::ConptyConnection>() })
             {
-                // ConPTY will emit sequences to sync up our buffer with its new
-                // contents.
+                // Since the clearing of ConPTY occurs asynchronously, this call can result weird issues,
+                // where a console application still sees contents that we've already deleted, etc.
+                // The correct way would be for ConPTY to emit the appropriate CSI n J sequences.
                 conpty.ClearBuffer();
             }
         }
@@ -2254,7 +2301,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                 const auto trimmed = s.substr(0, strEnd + 1);
                 return winrt::hstring{ trimmed };
             }
-            return winrt::hstring{ L"" };
+            return {};
         };
 
         const auto currentCommand = _terminal->CurrentCommand();
@@ -2272,14 +2319,33 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // If the very last thing in the list of recent commands, is exactly the
         // same as the current command, then let's not include it in the
         // history. It's literally the thing the user has typed, RIGHT now.
-        if (!commands.empty() && commands.back() == trimmedCurrentCommand)
+        // (also account for the fact that the cursor may be in the middle of a commandline)
+        if (!commands.empty() &&
+            !trimmedCurrentCommand.empty() &&
+            std::wstring_view{ commands.back() }.substr(0, trimmedCurrentCommand.size()) == trimmedCurrentCommand)
         {
             commands.pop_back();
         }
 
         auto context = winrt::make_self<CommandHistoryContext>(std::move(commands));
         context->CurrentCommandline(trimmedCurrentCommand);
+        context->QuickFixes(_cachedQuickFixes);
         return *context;
+    }
+
+    winrt::hstring ControlCore::CurrentWorkingDirectory() const
+    {
+        return winrt::hstring{ _terminal->GetWorkingDirectory() };
+    }
+
+    bool ControlCore::QuickFixesAvailable() const noexcept
+    {
+        return _cachedQuickFixes && _cachedQuickFixes.Size() > 0;
+    }
+
+    void ControlCore::UpdateQuickFixes(const Windows::Foundation::Collections::IVector<hstring>& quickFixes)
+    {
+        _cachedQuickFixes = quickFixes;
     }
 
     Core::Scheme ControlCore::ColorScheme() const noexcept
@@ -2379,7 +2445,6 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         const auto lock = _terminal->LockForWriting();
         _terminal->ApplyScheme(scheme);
-        _renderEngine->SetSelectionBackground(til::color{ _settings->SelectionBackground() });
         _renderer->TriggerRedrawAll(true);
     }
 
@@ -2434,13 +2499,21 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // - This is related to work done for GH#2988.
     void ControlCore::GotFocus()
     {
-        _focusChanged(true);
+        const auto shared = _shared.lock_shared();
+        if (shared->focusChanged)
+        {
+            (*shared->focusChanged)(true);
+        }
     }
 
     // See GotFocus.
     void ControlCore::LostFocus()
     {
-        _focusChanged(false);
+        const auto shared = _shared.lock_shared();
+        if (shared->focusChanged)
+        {
+            (*shared->focusChanged)(false);
+        }
     }
 
     void ControlCore::_focusChanged(bool focused)
@@ -2452,9 +2525,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         if (out && !out->empty())
         {
-            // _sendInputToConnection() asserts that we aren't in focus mode,
-            // but window focus events are always fine to send.
-            _connection.WriteInput(*out);
+            _sendInputToConnection(*out);
         }
     }
 
@@ -2631,8 +2702,8 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
     }
 
-    winrt::fire_and_forget ControlCore::_terminalCompletionsChanged(std::wstring_view menuJson,
-                                                                    unsigned int replaceLength)
+    safe_void_coroutine ControlCore::_terminalCompletionsChanged(std::wstring_view menuJson,
+                                                                 unsigned int replaceLength)
     {
         auto args = winrt::make_self<CompletionsChangedEventArgs>(winrt::hstring{ menuJson },
                                                                   replaceLength);
@@ -2645,21 +2716,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // Select the region of text between [s.start, s.end), in buffer space
     void ControlCore::_selectSpan(til::point_span s)
     {
-        // s.end is an _exclusive_ point. We need an inclusive one. But
-        // decrement in bounds wants an inclusive one. If you pass an exclusive
-        // one, then it might assert at you for being out of bounds. So we also
-        // take care of the case that the end point is outside the viewport
-        // manually.
+        // s.end is an _exclusive_ point. We need an inclusive one.
         const auto bufferSize{ _terminal->GetTextBuffer().GetSize() };
         til::point inclusiveEnd = s.end;
-        if (s.end.x == bufferSize.Width())
-        {
-            inclusiveEnd = til::point{ std::max(0, s.end.x - 1), s.end.y };
-        }
-        else
-        {
-            bufferSize.DecrementInBounds(inclusiveEnd);
-        }
+        bufferSize.DecrementInBounds(inclusiveEnd);
 
         _terminal->SelectNewRegion(s.start, inclusiveEnd);
         _renderer->TriggerSelection();
@@ -2898,5 +2958,4 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     {
         _terminal->PreviewText(input);
     }
-
 }

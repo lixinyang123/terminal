@@ -34,6 +34,7 @@
 #include "ScrollToMarkArgs.g.h"
 #include "AddMarkArgs.g.h"
 #include "MoveTabArgs.g.h"
+#include "SaveSnippetArgs.g.h"
 #include "ToggleCommandPaletteArgs.g.h"
 #include "SuggestionsArgs.g.h"
 #include "FindMatchArgs.g.h"
@@ -55,7 +56,6 @@
 #include "JsonUtils.h"
 #include "HashUtils.h"
 #include "TerminalWarnings.h"
-#include "../inc/WindowingBehavior.h"
 
 #include "TerminalSettingsSerializationHelpers.h"
 
@@ -102,9 +102,10 @@ protected:                                                                  \
 // false, if we don't really care if the parameter is required or not.
 
 ////////////////////////////////////////////////////////////////////////////////
-#define COPY_TEXT_ARGS(X)                                      \
-    X(bool, DismissSelection, "dismissSelection", false, true) \
-    X(bool, SingleLine, "singleLine", false, false)            \
+#define COPY_TEXT_ARGS(X)                                               \
+    X(bool, DismissSelection, "dismissSelection", false, true)          \
+    X(bool, SingleLine, "singleLine", false, false)                     \
+    X(bool, WithControlSequences, "withControlSequences", false, false) \
     X(Windows::Foundation::IReference<Control::CopyFormat>, CopyFormatting, "copyFormatting", false, nullptr)
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -214,6 +215,12 @@ protected:                                                                  \
 ////////////////////////////////////////////////////////////////////////////////
 #define TOGGLE_COMMAND_PALETTE_ARGS(X) \
     X(CommandPaletteLaunchMode, LaunchMode, "launchMode", false, CommandPaletteLaunchMode::Action)
+
+////////////////////////////////////////////////////////////////////////////////
+#define SAVE_TASK_ARGS(X)                                                           \
+    X(winrt::hstring, Name, "name", false, L"")                                     \
+    X(winrt::hstring, Commandline, "commandline", args->Commandline().empty(), L"") \
+    X(winrt::hstring, KeyChord, "keyChord", false, L"")
 
 ////////////////////////////////////////////////////////////////////////////////
 #define SUGGESTIONS_ARGS(X)                                                 \
@@ -819,6 +826,8 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
 
     ACTION_ARGS_STRUCT(ToggleCommandPaletteArgs, TOGGLE_COMMAND_PALETTE_ARGS);
 
+    ACTION_ARGS_STRUCT(SaveSnippetArgs, SAVE_TASK_ARGS);
+
     ACTION_ARGS_STRUCT(SuggestionsArgs, SUGGESTIONS_ARGS);
 
     ACTION_ARGS_STRUCT(FindMatchArgs, FIND_MATCH_ARGS);
@@ -842,7 +851,7 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
             // LOAD BEARING: Not using make_self here _will_ break you in the future!
             auto args = winrt::make_self<GlobalSummonArgs>();
             // We want to summon the window with the name "_quake" specifically.
-            args->_Name = QuakeWindowName;
+            args->_Name = L"_quake";
             // We want the window to dropdown, with a 200ms duration.
             args->_DropdownDuration = 200;
             return { *args, {} };
@@ -928,6 +937,7 @@ namespace winrt::Microsoft::Terminal::Settings::Model::factory_implementation
     BASIC_FACTORY(SetTabColorArgs);
     BASIC_FACTORY(RenameTabArgs);
     BASIC_FACTORY(SwapPaneArgs);
+    BASIC_FACTORY(SendInputArgs);
     BASIC_FACTORY(SplitPaneArgs);
     BASIC_FACTORY(SetFocusModeArgs);
     BASIC_FACTORY(SetFullScreenArgs);
@@ -940,6 +950,7 @@ namespace winrt::Microsoft::Terminal::Settings::Model::factory_implementation
     BASIC_FACTORY(CloseTabArgs);
     BASIC_FACTORY(MoveTabArgs);
     BASIC_FACTORY(OpenSettingsArgs);
+    BASIC_FACTORY(SaveSnippetArgs);
     BASIC_FACTORY(FindMatchArgs);
     BASIC_FACTORY(NewWindowArgs);
     BASIC_FACTORY(FocusPaneArgs);

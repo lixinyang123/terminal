@@ -116,7 +116,7 @@ try
                     const auto lock = publicTerminal->_terminal->LockForWriting();
                     if (publicTerminal->_terminal->IsSelectionActive())
                     {
-                        const auto bufferData = publicTerminal->_terminal->RetrieveSelectedTextFromBuffer(false, true, true);
+                        const auto bufferData = publicTerminal->_terminal->RetrieveSelectedTextFromBuffer(false, false, true, true);
                         LOG_IF_FAILED(publicTerminal->_CopyTextToSystemClipboard(bufferData.plainText, bufferData.html, bufferData.rtf));
                         publicTerminal->_ClearSelection();
                         return 0;
@@ -356,7 +356,7 @@ HRESULT HwndTerminal::Refresh(const til::size windowSize, _Out_ til::size* dimen
     _renderer->TriggerRedrawAll();
 
     // Convert our new dimensions to characters
-    const auto viewInPixels = Viewport::FromDimensions(windowSize);
+    const auto viewInPixels = Viewport::FromDimensions({}, windowSize);
     const auto vp = _renderEngine->GetViewportInCharacters(viewInPixels);
 
     // Guard against resizing the window to 0 columns/rows, which the text buffer classes don't really support.
@@ -464,7 +464,7 @@ try
 
     Viewport viewInPixels;
     {
-        const auto viewInCharacters = Viewport::FromDimensions(dimensionsInCharacters);
+        const auto viewInCharacters = Viewport::FromDimensions({}, dimensionsInCharacters);
         const auto lock = publicTerminal->_terminal->LockForReading();
         viewInPixels = publicTerminal->_renderEngine->GetViewportInPixels(viewInCharacters);
     }
@@ -491,7 +491,7 @@ try
 {
     const auto publicTerminal = static_cast<const HwndTerminal*>(terminal);
 
-    const auto viewInPixels = Viewport::FromDimensions({ width, height });
+    const auto viewInPixels = Viewport::FromDimensions({}, { width, height });
     const auto lock = publicTerminal->_terminal->LockForReading();
     const auto viewInCharacters = publicTerminal->_renderEngine->GetViewportInCharacters(viewInPixels);
 
@@ -881,8 +881,7 @@ void _stdcall TerminalSetTheme(void* terminal, TerminalTheme theme, LPCWSTR font
         auto& renderSettings = publicTerminal->_terminal->GetRenderSettings();
         renderSettings.SetColorTableEntry(TextColor::DEFAULT_FOREGROUND, theme.DefaultForeground);
         renderSettings.SetColorTableEntry(TextColor::DEFAULT_BACKGROUND, theme.DefaultBackground);
-
-        publicTerminal->_renderEngine->SetSelectionBackground(theme.DefaultSelectionBackground, theme.SelectionBackgroundAlpha);
+        renderSettings.SetColorTableEntry(TextColor::SELECTION_BACKGROUND, theme.DefaultSelectionBackground);
 
         // Set the font colors
         for (size_t tableIndex = 0; tableIndex < 16; tableIndex++)
@@ -891,6 +890,9 @@ void _stdcall TerminalSetTheme(void* terminal, TerminalTheme theme, LPCWSTR font
             GSL_SUPPRESS(bounds .3)
             renderSettings.SetColorTableEntry(tableIndex, gsl::at(theme.ColorTable, tableIndex));
         }
+
+        // Save these values as the new default render settings.
+        renderSettings.SaveDefaultSettings();
 
         publicTerminal->_terminal->SetCursorStyle(static_cast<Microsoft::Console::VirtualTerminal::DispatchTypes::CursorStyle>(theme.CursorStyle));
 
@@ -1088,11 +1090,6 @@ til::rect HwndTerminal::GetBounds() const noexcept
 til::rect HwndTerminal::GetPadding() const noexcept
 {
     return {};
-}
-
-float HwndTerminal::GetScaleFactor() const noexcept
-{
-    return static_cast<float>(_currentDpi) / static_cast<float>(USER_DEFAULT_SCREEN_DPI);
 }
 
 void HwndTerminal::ChangeViewport(const til::inclusive_rect& NewWindow)

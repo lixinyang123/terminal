@@ -4,6 +4,7 @@
 #pragma once
 #include "TerminalPaneContent.g.h"
 #include "BellEventArgs.g.h"
+#include "BasicPaneEvents.h"
 
 namespace winrt::TerminalApp::implementation
 {
@@ -16,7 +17,7 @@ namespace winrt::TerminalApp::implementation
         til::property<bool> FlashTaskbar;
     };
 
-    struct TerminalPaneContent : TerminalPaneContentT<TerminalPaneContent>
+    struct TerminalPaneContent : TerminalPaneContentT<TerminalPaneContent>, BasicPaneEvents
     {
         TerminalPaneContent(const winrt::Microsoft::Terminal::Settings::Model::Profile& profile,
                             const TerminalApp::TerminalSettingsCache& cache,
@@ -51,14 +52,8 @@ namespace winrt::TerminalApp::implementation
         Windows::Foundation::Size GridUnitSize();
 
         til::typed_event<TerminalApp::TerminalPaneContent, winrt::Windows::Foundation::IInspectable> RestartTerminalRequested;
-        til::typed_event<> ConnectionStateChanged;
-        til::typed_event<IPaneContent> CloseRequested;
-        til::typed_event<IPaneContent, winrt::TerminalApp::BellEventArgs> BellRequested;
-        til::typed_event<IPaneContent> TitleChanged;
-        til::typed_event<IPaneContent> TabColorChanged;
-        til::typed_event<IPaneContent> TaskbarProgressChanged;
-        til::typed_event<IPaneContent> ReadOnlyChanged;
-        til::typed_event<IPaneContent> FocusRequested;
+
+        // See BasicPaneEvents for most generic event definitions
 
     private:
         winrt::Microsoft::Terminal::Control::TermControl _control{ nullptr };
@@ -87,9 +82,9 @@ namespace winrt::TerminalApp::implementation
         void _setupControlEvents();
         void _removeControlEvents();
 
-        winrt::fire_and_forget _playBellSound(winrt::Windows::Foundation::Uri uri);
+        safe_void_coroutine _playBellSound(winrt::Windows::Foundation::Uri uri);
 
-        winrt::fire_and_forget _controlConnectionStateChangedHandler(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& /*args*/);
+        safe_void_coroutine _controlConnectionStateChangedHandler(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& /*args*/);
         void _controlWarningBellHandler(const winrt::Windows::Foundation::IInspectable& sender,
                                         const winrt::Windows::Foundation::IInspectable& e);
         void _controlReadOnlyChangedHandler(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& e);

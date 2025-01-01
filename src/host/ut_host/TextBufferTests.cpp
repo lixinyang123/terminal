@@ -37,7 +37,6 @@ class TextBufferTests
     {
         m_state = new CommonState();
 
-        m_state->PrepareGlobalFont();
         m_state->PrepareGlobalScreenBuffer();
 
         return true;
@@ -46,7 +45,6 @@ class TextBufferTests
     TEST_CLASS_CLEANUP(ClassCleanup)
     {
         m_state->CleanupGlobalScreenBuffer();
-        m_state->CleanupGlobalFont();
 
         delete m_state;
 
@@ -1398,16 +1396,16 @@ void TextBufferTests::TestBackspaceStringsAPI()
         L"Using WriteCharsLegacy, write \\b \\b as a single string."));
     size_t aCb = 2;
     size_t seqCb = 6;
-    VERIFY_SUCCEEDED(DoWriteConsole(L"a", &aCb, si, false, waiter));
-    VERIFY_SUCCEEDED(DoWriteConsole(L"\b \b", &seqCb, si, false, waiter));
+    VERIFY_SUCCEEDED(DoWriteConsole(L"a", &aCb, si, waiter));
+    VERIFY_SUCCEEDED(DoWriteConsole(L"\b \b", &seqCb, si, waiter));
     VERIFY_ARE_EQUAL(cursor.GetPosition().x, x0);
     VERIFY_ARE_EQUAL(cursor.GetPosition().y, y0);
 
     seqCb = 2;
-    VERIFY_SUCCEEDED(DoWriteConsole(L"a", &seqCb, si, false, waiter));
-    VERIFY_SUCCEEDED(DoWriteConsole(L"\b", &seqCb, si, false, waiter));
-    VERIFY_SUCCEEDED(DoWriteConsole(L" ", &seqCb, si, false, waiter));
-    VERIFY_SUCCEEDED(DoWriteConsole(L"\b", &seqCb, si, false, waiter));
+    VERIFY_SUCCEEDED(DoWriteConsole(L"a", &seqCb, si, waiter));
+    VERIFY_SUCCEEDED(DoWriteConsole(L"\b", &seqCb, si, waiter));
+    VERIFY_SUCCEEDED(DoWriteConsole(L" ", &seqCb, si, waiter));
+    VERIFY_SUCCEEDED(DoWriteConsole(L"\b", &seqCb, si, waiter));
     VERIFY_ARE_EQUAL(cursor.GetPosition().x, x0);
     VERIFY_ARE_EQUAL(cursor.GetPosition().y, y0);
 }
@@ -2829,13 +2827,7 @@ void TextBufferTests::ReflowPromptRegions()
             til::point afterPos = originalPos;
             // walk that original pos dx times into the actual real place in the buffer.
             auto bufferViewport = tb.GetSize();
-            const auto walkDir = Viewport::WalkDir{ dx < 0 ? Viewport::XWalk::LeftToRight : Viewport::XWalk::RightToLeft,
-                                                    dx < 0 ? Viewport::YWalk::TopToBottom : Viewport::YWalk::BottomToTop };
-            for (auto i = 0; i < std::abs(dx); i++)
-            {
-                bufferViewport.WalkInBounds(afterPos,
-                                            walkDir);
-            }
+            bufferViewport.WalkInBounds(afterPos, -dx);
             const auto expectedOutputStart = !afterResize ?
                                                  originalPos : // printed exactly a row, so we're exactly below the prompt
                                                  afterPos;

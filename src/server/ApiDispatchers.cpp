@@ -182,6 +182,7 @@ constexpr T saturate(auto val)
         *pInputReadHandleData,
         a->Unicode,
         fIsPeek,
+        fIsWaitAllowed,
         waiter);
 
     // We must return the number of records in the message payload (to alert the client)
@@ -191,30 +192,13 @@ constexpr T saturate(auto val)
     size_t cbWritten;
     LOG_IF_FAILED(SizeTMult(outEvents.size(), sizeof(INPUT_RECORD), &cbWritten));
 
-    if (nullptr != waiter.get())
+    if (waiter)
     {
-        // In some circumstances, the read may have told us to wait because it didn't have data,
-        // but the client explicitly asked us to return immediate. In that case, we'll convert the
-        // wait request into a "0 bytes found, OK".
-
-        if (fIsWaitAllowed)
+        hr = ConsoleWaitQueue::s_CreateWait(m, waiter.release());
+        if (SUCCEEDED(hr))
         {
-            hr = ConsoleWaitQueue::s_CreateWait(m, waiter.release());
-            if (SUCCEEDED(hr))
-            {
-                *pbReplyPending = TRUE;
-                hr = CONSOLE_STATUS_WAIT;
-            }
-        }
-        else
-        {
-            // If wait isn't allowed and the routine generated a
-            // waiter, say there was nothing to be
-            // retrieved right now.
-            // The waiter will be auto-freed in the smart pointer.
-
-            cbWritten = 0;
-            hr = S_OK;
+            *pbReplyPending = TRUE;
+            hr = CONSOLE_STATUS_WAIT;
         }
     }
     else
@@ -374,8 +358,6 @@ constexpr T saturate(auto val)
     std::unique_ptr<IWaitRoutine> waiter;
     size_t cbRead;
 
-    const auto requiresVtQuirk{ m->GetProcessHandle()->GetShimPolicy().IsVtColorQuirkRequired() };
-
     // We have to hold onto the HR from the call and return it.
     // We can't return some other error after the actual API call.
     // This is because the write console function is allowed to write part of the string and then return an error.
@@ -391,7 +373,7 @@ constexpr T saturate(auto val)
             TraceLoggingUInt32(a->NumBytes, "NumBytes"),
             TraceLoggingCountedWideString(buffer.data(), static_cast<ULONG>(buffer.size()), "Buffer"));
 
-        hr = m->_pApiRoutines->WriteConsoleWImpl(*pScreenInfo, buffer, cchInputRead, requiresVtQuirk, waiter);
+        hr = m->_pApiRoutines->WriteConsoleWImpl(*pScreenInfo, buffer, cchInputRead, waiter);
 
         // We must set the reply length in bytes. Convert back from characters.
         LOG_IF_FAILED(SizeTMult(cchInputRead, sizeof(wchar_t), &cbRead));
@@ -406,7 +388,7 @@ constexpr T saturate(auto val)
             TraceLoggingUInt32(a->NumBytes, "NumBytes"),
             TraceLoggingCountedString(buffer.data(), static_cast<ULONG>(buffer.size()), "Buffer"));
 
-        hr = m->_pApiRoutines->WriteConsoleAImpl(*pScreenInfo, buffer, cchInputRead, requiresVtQuirk, waiter);
+        hr = m->_pApiRoutines->WriteConsoleAImpl(*pScreenInfo, buffer, cchInputRead, waiter);
 
         // Reply length is already in bytes (chars), don't need to convert.
         cbRead = cchInputRead;
@@ -465,7 +447,8 @@ constexpr T saturate(auto val)
                                                               a->Element,
                                                               fill,
                                                               til::wrap_coord(a->WriteCoord),
-                                                              amountWritten);
+                                                              amountWritten,
+                                                              m->GetProcessHandle()->GetShimPolicy().IsPowershellExe());
         break;
     }
     case CONSOLE_REAL_UNICODE:

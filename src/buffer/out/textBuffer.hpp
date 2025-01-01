@@ -135,6 +135,7 @@ public:
     const Microsoft::Console::Types::Viewport GetSize() const noexcept;
 
     void ScrollRows(const til::CoordType firstRow, const til::CoordType size, const til::CoordType delta);
+    void CopyRow(const til::CoordType srcRow, const til::CoordType dstRow, TextBuffer& dstBuffer) const;
 
     til::CoordType TotalRowCount() const noexcept;
 
@@ -265,6 +266,8 @@ public:
 
     std::wstring GetPlainText(const CopyRequest& req) const;
 
+    std::wstring GetWithControlSequences(const CopyRequest& req) const;
+
     std::string GenHTML(const CopyRequest& req,
                         const int fontHeightPoints,
                         const std::wstring_view fontFaceName,
@@ -279,7 +282,7 @@ public:
                        const bool isIntenseBold,
                        std::function<std::tuple<COLORREF, COLORREF, COLORREF>(const TextAttribute&)> GetAttributeColors) const noexcept;
 
-    void Serialize(const wchar_t* destination) const;
+    void SerializeToPath(const wchar_t* destination) const;
 
     struct PositionInformation
     {
@@ -325,11 +328,13 @@ private:
     til::point _GetWordEndForSelection(const til::point target, const std::wstring_view wordDelimiters) const;
     void _PruneHyperlinks();
 
-    std::wstring _commandForRow(const til::CoordType rowOffset, const til::CoordType bottomInclusive) const;
+    std::wstring _commandForRow(const til::CoordType rowOffset, const til::CoordType bottomInclusive, const bool clipAtCursor = false) const;
     MarkExtents _scrollMarkExtentForRow(const til::CoordType rowOffset, const til::CoordType bottomInclusive) const;
     bool _createPromptMarkIfNeeded();
 
     std::tuple<til::CoordType, til::CoordType, bool> _RowCopyHelper(const CopyRequest& req, const til::CoordType iRow, const ROW& row) const;
+
+    void _SerializeRow(const ROW& row, const til::CoordType startX, const til::CoordType endX, const bool addLineBreak, const bool isLastRow, std::wstring& buffer, std::optional<TextAttribute>& previousTextAttr, bool& delayedLineBreak) const;
 
     static void _AppendRTFText(std::string& contentBuilder, const std::wstring_view& text);
 

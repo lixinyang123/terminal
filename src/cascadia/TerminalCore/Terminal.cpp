@@ -52,14 +52,6 @@ void Terminal::Create(til::size viewportSize, til::CoordType scrollbackLines, Re
     auto dispatch = std::make_unique<AdaptDispatch>(*this, &renderer, _renderSettings, _terminalInput);
     auto engine = std::make_unique<OutputStateMachineEngine>(std::move(dispatch));
     _stateMachine = std::make_unique<StateMachine>(std::move(engine));
-
-    // Until we have a true pass-through mode (GH#1173), the decision as to
-    // whether C1 controls are interpreted or not is made at the conhost level.
-    // If they are being filtered out, then we will simply never receive them.
-    // But if they are being accepted by conhost, there's a chance they may get
-    // passed through in some situations, so it's important that our state
-    // machine is always prepared to accept them.
-    _stateMachine->SetParserMode(StateMachine::Mode::AlwaysAcceptC1, true);
 }
 
 // Method Description:
@@ -90,11 +82,18 @@ void Terminal::UpdateSettings(ICoreSettings settings)
 
     _snapOnInput = settings.SnapOnInput();
     _altGrAliasing = settings.AltGrAliasing();
+    _answerbackMessage = settings.AnswerbackMessage();
     _wordDelimiters = settings.WordDelimiters();
     _suppressApplicationTitle = settings.SuppressApplicationTitle();
     _startingTitle = settings.StartingTitle();
     _trimBlockSelection = settings.TrimBlockSelection();
     _autoMarkPrompts = settings.AutoMarkPrompts();
+    _rainbowSuggestions = settings.RainbowSuggestions();
+
+    if (_stateMachine)
+    {
+        SetVtChecksumReportSupport(settings.AllowVtChecksumReport());
+    }
 
     _getTerminalInput().ForceDisableWin32InputMode(settings.ForceVTInput());
 
@@ -106,6 +105,9 @@ void Terminal::UpdateSettings(ICoreSettings settings)
     {
         GetRenderSettings().SetColorTableEntry(TextColor::FRAME_BACKGROUND, til::color{ settings.TabColor().Value() });
     }
+
+    // Save the changes made above and in UpdateAppearance as the new default render settings.
+    GetRenderSettings().SaveDefaultSettings();
 
     if (!_startingTabColor && settings.StartingTabColor())
     {
@@ -161,6 +163,8 @@ void Terminal::UpdateAppearance(const ICoreAppearance& appearance)
     renderSettings.SetColorAlias(ColorAlias::DefaultForeground, TextColor::DEFAULT_FOREGROUND, newForegroundColor);
     const til::color newCursorColor{ appearance.CursorColor() };
     renderSettings.SetColorTableEntry(TextColor::CURSOR_COLOR, newCursorColor);
+    const til::color newSelectionColor{ appearance.SelectionBackground() };
+    renderSettings.SetColorTableEntry(TextColor::SELECTION_BACKGROUND, newSelectionColor);
 
     for (auto i = 0; i < 16; i++)
     {
@@ -213,10 +217,10 @@ void Terminal::SetCursorStyle(const DispatchTypes::CursorStyle cursorStyle)
     engine.Dispatch().SetCursorStyle(cursorStyle);
 }
 
-void Terminal::EraseScrollback()
+void Terminal::SetVtChecksumReportSupport(const bool enabled)
 {
     auto& engine = reinterpret_cast<OutputStateMachineEngine&>(_stateMachine->Engine());
-    engine.Dispatch().EraseInDisplay(DispatchTypes::EraseType::Scrollback);
+    engine.Dispatch().SetVtChecksumReportSupport(enabled);
 }
 
 bool Terminal::IsXtermBracketedPasteModeEnabled() const noexcept
@@ -699,34 +703,44 @@ TerminalInput::OutputType Terminal::SendCharEvent(const wchar_t ch, const WORD s
         vkey = _VirtualKeyFromCharacter(ch);
     }
 
-    // GH#1527: When the user has auto mark prompts enabled, we're going to try
-    // and heuristically detect if this was the line the prompt was on.
-    // * If the key was an Enter keypress (Terminal.app also marks ^C keypresses
-    //   as prompts. That's omitted for now.)
-    // * AND we're not in the alt buffer
-    //
-    // Then treat this line like it's a prompt mark.
-    if (_autoMarkPrompts && vkey == VK_RETURN && !_inAltBuffer())
+    if (vkey == VK_RETURN && !_inAltBuffer())
     {
-        // We need to be a little tricky here, to try and support folks that are
-        // auto-marking prompts, but don't necessarily have the rest of shell
-        // integration enabled.
-        //
-        // We'll set the current attributes to Output, so that the output after
-        // here is marked as the command output. But we also need to make sure
-        // that a mark was started.
-        // We can't just check if the current row has a mark - there could be a
-        // multiline prompt.
-        //
-        // (TextBuffer::_createPromptMarkIfNeeded does that work for us)
-
-        const bool createdMark = _activeBuffer().StartOutput();
-        if (createdMark)
+        // Treat VK_RETURN as a new prompt,
+        // so we should clear the quick fix UI if it's visible.
+        if (_pfnClearQuickFix)
         {
-            _activeBuffer().ManuallyMarkRowAsPrompt(_activeBuffer().GetCursor().GetPosition().y);
+            _pfnClearQuickFix();
+        }
 
-            // This changed the scrollbar marks - raise a notification to update them
-            _NotifyScrollEvent();
+        // GH#1527: When the user has auto mark prompts enabled, we're going to try
+        // and heuristically detect if this was the line the prompt was on.
+        // * If the key was an Enter keypress (Terminal.app also marks ^C keypresses
+        //   as prompts. That's omitted for now.)
+        // * AND we're not in the alt buffer
+        //
+        // Then treat this line like it's a prompt mark.
+        if (_autoMarkPrompts && _mainBuffer && !_inAltBuffer())
+        {
+            // We need to be a little tricky here, to try and support folks that are
+            // auto-marking prompts, but don't necessarily have the rest of shell
+            // integration enabled.
+            //
+            // We'll set the current attributes to Output, so that the output after
+            // here is marked as the command output. But we also need to make sure
+            // that a mark was started.
+            // We can't just check if the current row has a mark - there could be a
+            // multiline prompt.
+            //
+            // (TextBuffer::_createPromptMarkIfNeeded does that work for us)
+
+            const bool createdMark = _mainBuffer->StartOutput();
+            if (createdMark)
+            {
+                _mainBuffer->ManuallyMarkRowAsPrompt(_mainBuffer->GetCursor().GetPosition().y);
+
+                // This changed the scrollbar marks - raise a notification to update them
+                _NotifyScrollEvent();
+            }
         }
     }
 
@@ -961,7 +975,7 @@ Viewport Terminal::_GetMutableViewport() const noexcept
     // GH#3493: if we're in the alt buffer, then it's possible that the mutable
     // viewport's size hasn't been updated yet. In that case, use the
     // temporarily stashed _altBufferSize instead.
-    return _inAltBuffer() ? Viewport::FromDimensions(_altBufferSize) :
+    return _inAltBuffer() ? Viewport::FromDimensions({}, _altBufferSize) :
                             _mutableViewport;
 }
 
@@ -1128,6 +1142,11 @@ void Terminal::SetShowWindowCallback(std::function<void(bool)> pfn) noexcept
     _pfnShowWindowChanged.swap(pfn);
 }
 
+void Terminal::SetWindowSizeChangedCallback(std::function<void(int32_t, int32_t)> pfn) noexcept
+{
+    _pfnWindowSizeChanged.swap(pfn);
+}
+
 // Method Description:
 // - Allows setting a callback for playing MIDI notes.
 // Arguments:
@@ -1227,6 +1246,16 @@ void Microsoft::Terminal::Core::Terminal::CompletionsChangedCallback(std::functi
     _pfnCompletionsChanged.swap(pfn);
 }
 
+void Microsoft::Terminal::Core::Terminal::SetSearchMissingCommandCallback(std::function<void(std::wstring_view, const til::CoordType)> pfn) noexcept
+{
+    _pfnSearchMissingCommand.swap(pfn);
+}
+
+void Microsoft::Terminal::Core::Terminal::SetClearQuickFixCallback(std::function<void()> pfn) noexcept
+{
+    _pfnClearQuickFix.swap(pfn);
+}
+
 // Method Description:
 // - Stores the search highlighted regions in the terminal
 void Terminal::SetSearchHighlights(const std::vector<til::point_span>& highlights) noexcept
@@ -1238,16 +1267,20 @@ void Terminal::SetSearchHighlights(const std::vector<til::point_span>& highlight
 // Method Description:
 // - Stores the focused search highlighted region in the terminal
 // - If the region isn't empty, it will be brought into view
-void Terminal::SetSearchHighlightFocused(const size_t focusedIdx)
+void Terminal::SetSearchHighlightFocused(const size_t focusedIdx) noexcept
 {
     _assertLocked();
     _searchHighlightFocused = focusedIdx;
+}
 
-    // bring the focused region into the view if the index is in valid range
-    if (focusedIdx < _searchHighlights.size())
+void Terminal::ScrollToSearchHighlight(til::CoordType searchScrollOffset)
+{
+    if (_searchHighlightFocused < _searchHighlights.size())
     {
-        const auto focused = til::at(_searchHighlights, focusedIdx);
-        _ScrollToPoints(focused.start, focused.end);
+        const auto focused = til::at(_searchHighlights, _searchHighlightFocused);
+        const auto adjustedStart = til::point{ focused.start.x, std::max(0, focused.start.y - searchScrollOffset) };
+        const auto adjustedEnd = til::point{ focused.end.x, std::max(0, focused.end.y - searchScrollOffset) };
+        _ScrollToPoints(adjustedStart, adjustedEnd);
     }
 }
 
@@ -1259,8 +1292,8 @@ Scheme Terminal::GetColorScheme() const
     s.Foreground = til::color{ renderSettings.GetColorAlias(ColorAlias::DefaultForeground) };
     s.Background = til::color{ renderSettings.GetColorAlias(ColorAlias::DefaultBackground) };
 
-    // SelectionBackground is stored in the ControlAppearance
     s.CursorColor = til::color{ renderSettings.GetColorTableEntry(TextColor::CURSOR_COLOR) };
+    s.SelectionBackground = til::color{ renderSettings.GetColorTableEntry(TextColor::SELECTION_BACKGROUND) };
 
     s.Black = til::color{ renderSettings.GetColorTableEntry(TextColor::DARK_BLACK) };
     s.Red = til::color{ renderSettings.GetColorTableEntry(TextColor::DARK_RED) };
@@ -1306,6 +1339,7 @@ void Terminal::ApplyScheme(const Scheme& colorScheme)
     renderSettings.SetColorTableEntry(TextColor::BRIGHT_WHITE, til::color{ colorScheme.BrightWhite });
 
     renderSettings.SetColorTableEntry(TextColor::CURSOR_COLOR, til::color{ colorScheme.CursorColor });
+    renderSettings.SetColorTableEntry(TextColor::SELECTION_BACKGROUND, til::color{ colorScheme.SelectionBackground });
 
     // Tell the control that the scrollbar has somehow changed. Used as a
     // workaround to force the control to redraw any scrollbar marks whose color
@@ -1408,6 +1442,11 @@ PointTree Terminal::_getPatterns(til::CoordType beg, til::CoordType end) const
     static constexpr std::array<std::wstring_view, 1> patterns{
         LR"(\b(?:https?|ftp|file)://[-A-Za-z0-9+&@#/%?=~_|$!:,.;]*[A-Za-z0-9+&@#/%=~_|$])",
     };
+
+    if (!_detectURLs)
+    {
+        return {};
+    }
 
     auto text = ICU::UTextFromTextBuffer(_activeBuffer(), beg, end + 1);
     UErrorCode status = U_ZERO_ERROR;
@@ -1531,7 +1570,7 @@ std::wstring Terminal::CurrentCommand() const
 
 void Terminal::SerializeMainBuffer(const wchar_t* destination) const
 {
-    _mainBuffer->Serialize(destination);
+    _mainBuffer->SerializeToPath(destination);
 }
 
 void Terminal::ColorSelection(const TextAttribute& attr, winrt::Microsoft::Terminal::Core::MatchMode matchMode)
@@ -1576,20 +1615,27 @@ void Terminal::ColorSelection(const TextAttribute& attr, winrt::Microsoft::Termi
 }
 
 // Method Description:
-// - Returns the position of the cursor relative to the active viewport
+// - Returns the position of the cursor relative to the visible viewport
 til::point Terminal::GetViewportRelativeCursorPosition() const noexcept
 {
     const auto absoluteCursorPosition{ GetCursorPosition() };
-    const auto viewport{ _GetMutableViewport() };
-    return absoluteCursorPosition - viewport.Origin();
+    const auto mutableViewport{ _GetMutableViewport() };
+    const auto relativeCursorPos = absoluteCursorPosition - mutableViewport.Origin();
+    return { relativeCursorPos.x, relativeCursorPos.y + _scrollOffset };
 }
 
 void Terminal::PreviewText(std::wstring_view input)
 {
-    // Our suggestion text is default-on-default, in italics.
+    // Our default suggestion text is default-on-default, in italics.
     static constexpr TextAttribute previewAttrs{ CharacterAttributes::Italics, TextColor{}, TextColor{}, 0u, TextColor{} };
 
     auto lock = LockForWriting();
+
+    if (_mainBuffer == nullptr)
+    {
+        return;
+    }
+
     if (input.empty())
     {
         snippetPreview.text = L"";
@@ -1626,11 +1672,43 @@ void Terminal::PreviewText(std::wstring_view input)
         // pad it out
         preview.insert(originalSize, expectedLenTillEnd - originalSize, L' ');
     }
-    snippetPreview.text = til::visualize_nonspace_control_codes(preview);
+
     // Build our composition data
+    // The text is just the trimmed command, with the spaces at the end.
+    snippetPreview.text = til::visualize_nonspace_control_codes(preview);
+
+    // The attributes depend on the $profile:experimental.rainbowSuggestions setting:.
     const auto len = snippetPreview.text.size();
     snippetPreview.attributes.clear();
-    snippetPreview.attributes.emplace_back(len, previewAttrs);
+
+    if (_rainbowSuggestions)
+    {
+        // Let's do something fun.
+
+        // Use the actual text length for the number of steps, not including the
+        // trailing spaces.
+        const float increment = 1.0f / originalSize;
+        for (auto i = 0u; i < originalSize; i++)
+        {
+            const auto color = til::color::from_hue(increment * i);
+            TextAttribute curr = previewAttrs;
+            curr.SetForeground(color);
+            snippetPreview.attributes.emplace_back(1, curr);
+        }
+
+        if (originalSize < len)
+        {
+            TextAttribute curr;
+            snippetPreview.attributes.emplace_back(len - originalSize, curr);
+        }
+    }
+    else
+    {
+        // Default:
+        // Use the default attribute we defined above.
+        snippetPreview.attributes.emplace_back(len, previewAttrs);
+    }
+
     snippetPreview.cursorPos = len;
     _activeBuffer().NotifyPaintFrame();
 }
